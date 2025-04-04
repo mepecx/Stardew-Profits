@@ -250,6 +250,166 @@ function getDehydratorModifier(crop) {
 }
 
 /*
+ * Calculates the growth time for a crop.
+ * @param crop The crop object, containing all the crop data.
+ * @param fertilizer The fertilizer object.
+ * @return The time it takes for the crop to grow initially.
+ */
+function getGrowthTime(crop, fertilizer) {
+    if (options.skills.agri)
+        return Math.floor(crop.growth.initial * (fertilizer.growth - 0.1));
+    else
+        return Math.floor(crop.growth.initial * fertilizer.growth);
+}
+
+/*
+ * Calculates the number of new crops that can be planted with the given profit.
+ * @param profit The profit available for buying new seeds.
+ * @param crop The crop object, containing all the crop data.
+ * @return The number of new crops that can be planted.
+ */
+function calculateNewCrops(profit, crop) {
+    var seedCost = minSeedCost(crop);
+    if (seedCost <= 0) return 0;
+    
+    // Calculate how much of the profit to reinvest
+    var reinvestAmount = profit * (options.reinvestmentPercentage / 100);
+    
+    // Calculate how many new crops can be planted
+    return Math.floor(reinvestAmount / seedCost);
+}
+
+/*
+ * Checks if there's enough time left to grow a crop.
+ * @param crop The crop object, containing all the crop data.
+ * @param currentDay The current day in the season.
+ * @param fertilizer The fertilizer object.
+ * @return True if there's enough time to grow the crop, false otherwise.
+ */
+function canPlantNewCrop(crop, currentDay, fertilizer) {
+    var growthTime = getGrowthTime(crop, fertilizer);
+    var remainingDays = options.days - currentDay;
+    
+    return growthTime <= remainingDays;
+}
+
+/*
+ * Calculates the farm expansion profit for a specified crop.
+ * @param crop The crop object, containing all the crop data.
+ * @return The total profit with farm expansion.
+ */
+function calculateFarmExpansion(crop) {
+    var fertilizer = fertilizers[options.fertilizer];
+    var initialCrops = planted(crop);
+    var currentCrops = initialCrops;
+    var totalProfit = 0;
+    var currentDay = 1;
+    var isTea = crop.name == "Tea Leaves";
+    var isCoffee = crop.name == "Coffee Bean";
+    var expansionData = {
+        cycles: [],
+        totalCropsPlanted: initialCrops,
+        finalProfit: 0
+    };
+    
+    // Calculate initial growth time
+    var growthTime = getGrowthTime(crop, fertilizer);
+    
+    // For each expansion cycle
+    for (var cycle = 0; cycle < options.expansionCycles; cycle++) {
+        // If we've run out of days, break
+        if (currentDay > options.days) break;
+        
+        var cycleData = {
+            day: currentDay,
+            cropsPlanted: currentCrops,
+            harvestDay: currentDay + growthTime,
+            profit: 0,
+            newCrops: 0
+        };
+        
+        // Advance to harvest day
+        currentDay += growthTime;
+        
+        // If we've run out of days, break
+        if (currentDay > options.days) break;
+        
+        // Calculate profit from this harvest
+        var harvestProfit = 0;
+        
+        // For regrowable crops, calculate multiple harvests
+        if (crop.growth.regrow > 0) {
+            var harvestCount = 1; // First harvest after initial growth
+            var nextHarvestDay = currentDay + crop.growth.regrow;
+            
+            while (nextHarvestDay <= options.days) {
+                harvestCount++;
+                nextHarvestDay += crop.growth.regrow;
+            }
+            
+            // Calculate profit for all harvests of these crops
+            var singleHarvestOptions = JSON.parse(JSON.stringify(options));
+            singleHarvestOptions.planted = currentCrops;
+            singleHarvestOptions.days = options.days - currentDay + growthTime + 1; // Remaining days plus growth time
+            
+            // Create a temporary crop with just one harvest to calculate profit
+            var tempCrop = JSON.parse(JSON.stringify(crop));
+            tempCrop.harvests = harvestCount;
+            
+            // Calculate profit using the standard profit function
+            var tempOptions = options;
+            options = singleHarvestOptions;
+            var profitData = profit(tempCrop);
+            options = tempOptions;
+            
+            harvestProfit = profitData.profit;
+        } else {
+            // For non-regrowable crops, just calculate one harvest
+            var singleHarvestOptions = JSON.parse(JSON.stringify(options));
+            singleHarvestOptions.planted = currentCrops;
+            singleHarvestOptions.days = growthTime; // Just enough days for one harvest
+            
+            // Create a temporary crop with just one harvest to calculate profit
+            var tempCrop = JSON.parse(JSON.stringify(crop));
+            tempCrop.harvests = 1;
+            
+            // Calculate profit using the standard profit function
+            var tempOptions = options;
+            options = singleHarvestOptions;
+            var profitData = profit(tempCrop);
+            options = tempOptions;
+            
+            harvestProfit = profitData.profit;
+            
+            // For non-regrowable crops, we need to plant again, so advance the day
+            currentDay += growthTime;
+        }
+        
+        // Add this harvest's profit to total
+        totalProfit += harvestProfit;
+        cycleData.profit = harvestProfit;
+        
+        // Calculate how many new crops can be planted
+        var newCrops = calculateNewCrops(harvestProfit, crop);
+        cycleData.newCrops = newCrops;
+        
+        // Check if there's enough time to grow new crops
+        if (newCrops > 0 && canPlantNewCrop(crop, currentDay, fertilizer)) {
+            currentCrops += newCrops;
+            expansionData.totalCropsPlanted += newCrops;
+        }
+        
+        expansionData.cycles.push(cycleData);
+        
+        // If no new crops were planted, break the loop
+        if (newCrops <= 0) break;
+    }
+    
+    expansionData.finalProfit = totalProfit;
+    return expansionData;
+}
+
+/*
  * Calculates the profit for a specified crop.
  * @param crop The crop object, containing all the crop data.
  * @return The total profit.
@@ -578,8 +738,16 @@ function valueCrops() {
 		cropList[i].harvests = harvests(cropList[i].id);
 		cropList[i].seedLoss = seedLoss(cropList[i]);
 		cropList[i].fertLoss = fertLoss(cropList[i]);
-		cropList[i].profitData = profit(cropList[i]);
-        cropList[i].profit = cropList[i].profitData.profit;
+		// Calculate profit based on whether farm expansion is enabled
+		if (options.expansion && options.buySeed) {
+			var expansionData = calculateFarmExpansion(cropList[i]);
+			cropList[i].profitData = profit(cropList[i]);
+			cropList[i].profit = expansionData.finalProfit;
+			cropList[i].expansionData = expansionData;
+		} else {
+			cropList[i].profitData = profit(cropList[i]);
+			cropList[i].profit = cropList[i].profitData.profit;
+		}
 		cropList[i].totalReturnOnInvestment = cropList[i].profitData.totalReturnOnInvestment;
 		cropList[i].averageReturnOnInvestment = cropList[i].profitData.averageReturnOnInvestment;
 		cropList[i].netExpenses = cropList[i].profitData.netExpenses;
@@ -1084,6 +1252,52 @@ function renderGraph() {
 				tooltipTr = tooltipTable.append("tr");
 				tooltipTr.append("td").attr("class", "tooltipTdLeft").text("Harvests:");
 				tooltipTr.append("td").attr("class", "tooltipTdRight").text(d.harvests);
+				
+				// Display farm expansion data if enabled
+				if (options.expansion && options.buySeed && d.expansionData) {
+					tooltip.append("h3").attr("class", "tooltipTitleExtra").text("Farm Expansion");
+					var expansionTable = tooltip.append("table")
+						.attr("class", "tooltipTable")
+						.attr("cellspacing", 0);
+					
+					var expansionTr = expansionTable.append("tr");
+					expansionTr.append("td").attr("class", "tooltipTdLeft").text("Total crops planted:");
+					expansionTr.append("td").attr("class", "tooltipTdRight").text(d.expansionData.totalCropsPlanted);
+					
+					expansionTr = expansionTable.append("tr");
+					expansionTr.append("td").attr("class", "tooltipTdLeft").text("Expansion cycles:");
+					expansionTr.append("td").attr("class", "tooltipTdRight").text(d.expansionData.cycles.length);
+					
+					// Show details for each expansion cycle
+					if (d.expansionData.cycles.length > 0) {
+						var cyclesTable = tooltip.append("table")
+							.attr("class", "tooltipTable")
+							.attr("cellspacing", 0);
+						
+						var headerTr = cyclesTable.append("tr");
+						headerTr.append("td").attr("class", "tooltipTdLeft").text("Cycle");
+						headerTr.append("td").attr("class", "tooltipTdRight").text("Day");
+						headerTr.append("td").attr("class", "tooltipTdRight").text("Crops");
+						headerTr.append("td").attr("class", "tooltipTdRight").text("Profit");
+						headerTr.append("td").attr("class", "tooltipTdRight").text("New Crops");
+						
+						for (var i = 0; i < Math.min(d.expansionData.cycles.length, 5); i++) {
+							var cycle = d.expansionData.cycles[i];
+							var cycleTr = cyclesTable.append("tr");
+							cycleTr.append("td").attr("class", "tooltipTdLeft").text(i + 1);
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycle.day);
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycle.cropsPlanted);
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(formatNumber(cycle.profit));
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycle.newCrops);
+						}
+						
+						// If there are more than 5 cycles, show a message
+						if (d.expansionData.cycles.length > 5) {
+							var moreTr = cyclesTable.append("tr");
+							moreTr.append("td").attr("class", "tooltipTdLeft").attr("colspan", 5).text("... and " + (d.expansionData.cycles.length - 5) + " more cycles");
+						}
+					}
+				}
 
 				if (options.extra) {
                     var fertilizer = fertilizers[options.fertilizer];
@@ -1537,6 +1751,31 @@ function updateData() {
     }
     options.nextyear = document.getElementById('check_nextyear').checked;
 
+    options.expansion = document.getElementById('check_expansion').checked;
+    
+    var tr_expansion_cyclesID = document.getElementById('tr_expansion_cycles');
+    var tr_reinvestment_percentID = document.getElementById('tr_reinvestment_percent');
+    
+    if (options.expansion) {
+        tr_expansion_cyclesID.classList.remove('hidden');
+        tr_reinvestment_percentID.classList.remove('hidden');
+    } else {
+        tr_expansion_cyclesID.classList.add('hidden');
+        tr_reinvestment_percentID.classList.add('hidden');
+    }
+    
+    if (document.getElementById('expansion_cycles').value < 1)
+        document.getElementById('expansion_cycles').value = 1;
+    if (document.getElementById('expansion_cycles').value > 100)
+        document.getElementById('expansion_cycles').value = 100;
+    options.expansionCycles = parseInt(document.getElementById('expansion_cycles').value);
+    
+    if (document.getElementById('reinvestment_percent').value < 1)
+        document.getElementById('reinvestment_percent').value = 1;
+    if (document.getElementById('reinvestment_percent').value > 100)
+        document.getElementById('reinvestment_percent').value = 100;
+    options.reinvestmentPercentage = parseInt(document.getElementById('reinvestment_percent').value);
+
     if (document.getElementById('number_planted').value <= 0)
         document.getElementById('number_planted').value = 1;
     if (options.replant && parseInt(document.getElementById('number_planted').value) % 2 == 1)
@@ -1742,6 +1981,15 @@ function optionsLoad() {
 
     options.nextyear = validBoolean(options.nextyear);
     document.getElementById('check_nextyear').checked = options.nextyear;
+    
+    options.expansion = validBoolean(options.expansion);
+    document.getElementById('check_expansion').checked = options.expansion;
+    
+    options.expansionCycles = validIntRange(1, 100, options.expansionCycles);
+    document.getElementById('expansion_cycles').value = options.expansionCycles;
+    
+    options.reinvestmentPercentage = validIntRange(1, 100, options.reinvestmentPercentage);
+    document.getElementById('reinvestment_percent').value = options.reinvestmentPercentage;
 
 	options.fertilizer = validIntRange(0, 6, options.fertilizer);
 	document.getElementById('select_fertilizer').value = options.fertilizer;

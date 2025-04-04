@@ -148,6 +148,21 @@
                 <td><input type="checkbox" id="check_nextyear" onChange="refresh()" /></td>
             </tr>
 
+            <tr>
+                <td>Farm Expansion:</td>
+                <td><input type="checkbox" id="check_expansion" onChange="refresh()" /> <label for="check_expansion">(Reinvest profits)</label></td>
+            </tr>
+
+            <tr id="tr_expansion_cycles">
+                <td>Max Expansion Cycles:</td>
+                <td><input type="number" id="expansion_cycles" value="5" min="1" max="100" onChange="refresh()"/></td>
+            </tr>
+
+            <tr id="tr_reinvestment_percent">
+                <td>Reinvestment %:</td>
+                <td><input type="number" id="reinvestment_percent" value="100" min="1" max="100" onChange="refresh()"/></td>
+            </tr>
+
 			<tr>
 				<td>Fertilizer:</td>
 				<td>
