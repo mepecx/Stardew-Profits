@@ -268,16 +268,17 @@ function getGrowthTime(crop, fertilizer) {
  * @param crop The crop object, containing all the crop data.
  * @return The number of new crops that can be planted.
  */
-function calculateNewCrops(profit, crop) {
-    var seedCost = minSeedCost(crop);
-    if (seedCost <= 0) return 0;
+// This function seems unused after the expansion logic changes, but keeping it for now.
+// function calculateNewCrops(profit, crop) {
+//     var seedCost = minSeedCost(crop);
+//     if (seedCost <= 0) return 0;
     
-    // Calculate how much of the profit to reinvest
-    var reinvestAmount = profit * (options.reinvestmentPercentage / 100);
+//     // Calculate how much of the profit to reinvest
+//     var reinvestAmount = profit * (options.reinvestmentPercentage / 100); // Old logic
     
-    // Calculate how many new crops can be planted
-    return Math.floor(reinvestAmount / seedCost);
-}
+//     // Calculate how many new crops can be planted
+//     return Math.floor(reinvestAmount / seedCost);
+// }
 
 /*
  * Checks if there's enough time left to grow a crop.
@@ -296,116 +297,170 @@ function canPlantNewCrop(crop, currentDay, fertilizer) {
 /*
  * Calculates the farm expansion profit for a specified crop.
  * @param crop The crop object, containing all the crop data.
- * @return The total profit with farm expansion.
+ * @return The total profit with farm expansion, following the reinvestment strategy.
  */
 function calculateFarmExpansion(crop) {
+    // This function implements the user-described expansion logic, primarily for non-regrowing crops.
+    // It simulates cycles based on harvests and reinvests cumulative profit.
     var fertilizer = fertilizers[options.fertilizer];
-    var initialCrops = planted(crop);
-    var currentCrops = initialCrops;
-    var totalProfit = 0;
-    var currentDay = 1;
-    var isTea = crop.name == "Tea Leaves";
-    var isCoffee = crop.name == "Coffee Bean";
+    var initialCrops = planted(crop); // This might be a string
+    var seedCost = minSeedCost(crop);
+
+    // Calculate average sell price considering quality ratios
+    var useLevel = crop.isWildseed ? options.foragingLevel : options.level;
+    var {ratioN, ratioS, ratioG, ratioI} = levelRatio(fertilizer.ratio, useLevel + options.foodLevel, crop.isWildseed);
+    // Tea leaves don't have quality
+    if (crop.name == "Tea Leaves") ratioN = 1, ratioS = ratioG = ratioI = 0;
+    var averageSellPrice = (crop.produce.price * ratioN + Math.trunc(crop.produce.price * 1.25) * ratioS + Math.trunc(crop.produce.price * 1.5) * ratioG + crop.produce.price * 2 * ratioI) * (options.skills.till ? 1.1 : 1);
+
+    // Ensure initialCrops is a number before proceeding
+    var numericInitialCrops = parseInt(initialCrops, 10) || 0; // Convert to number, default to 0 if invalid
+
+    // If seed cost is zero (e.g., special seeds not bought), expansion doesn't make sense.
+    // Also, skip for regrowing crops for now, as the reinvestment logic is different.
+    if (seedCost <= 0 || crop.growth.regrow > 0) {
+        // Return data indicating no expansion occurred or is applicable
+        var profitData = profit(crop); // Calculate profit normally
+        return {
+            cycles: [],
+            totalCropsPlanted: numericInitialCrops, // Use the numeric value here
+            finalProfit: profitData.profit, // Standard profit
+            notApplicable: true // Flag to indicate expansion logic wasn't used
+        };
+    }
+
+    var currentCrops = numericInitialCrops; // Use numeric value
+    var cumulativeProfit = 0; // Start at 0, initial cost is handled implicitly in first cycle's net profit
+    // Determine the actual starting day and total days in the period
+    var startDay = options.season === 4 ? 1 : parseInt(document.getElementById('current_day').value, 10) || 1;
+    var totalDaysInPeriod = options.season === 4 ? options.days : (options.crossSeason ? 56 : 28);
+    var currentDay = startDay; // Start simulation from the actual start day
+    var cycle = 0;
+    // Initialize totalSeedsPurchased with the numeric value
+    var totalSeedsPurchased = numericInitialCrops; // Track total seeds bought over time
+
     var expansionData = {
         cycles: [],
-        totalCropsPlanted: initialCrops,
-        finalProfit: 0
+        totalCropsPlanted: totalSeedsPurchased, // Initial value is now numeric
+        finalProfit: 0,
+        notApplicable: false
     };
-    
-    // Calculate initial growth time
-    var growthTime = getGrowthTime(crop, fertilizer);
-    
-    // For each expansion cycle
-    for (var cycle = 0; cycle < options.expansionCycles; cycle++) {
-        // If we've run out of days, break
-        if (currentDay > options.days) break;
-        
-        var cycleData = {
-            day: currentDay,
-            cropsPlanted: currentCrops,
-            harvestDay: currentDay + growthTime,
-            profit: 0,
-            newCrops: 0
-        };
-        
-        // Advance to harvest day
-        currentDay += growthTime;
-        
-        // If we've run out of days, break
-        if (currentDay > options.days) break;
-        
-        // Calculate profit from this harvest
-        var harvestProfit = 0;
-        
-        // For regrowable crops, calculate multiple harvests
-        if (crop.growth.regrow > 0) {
-            var harvestCount = 1; // First harvest after initial growth
-            var nextHarvestDay = currentDay + crop.growth.regrow;
-            
-            while (nextHarvestDay <= options.days) {
-                harvestCount++;
-                nextHarvestDay += crop.growth.regrow;
+
+    while (true) { // Loop continues until break conditions are met
+        // Removed cycle++ from here
+        var growthTime = getGrowthTime(crop, fertilizer);
+        var harvestDay = currentDay + growthTime;
+
+        // Check if the harvest happens after the period ends
+        if (harvestDay > totalDaysInPeriod) {
+            // If we couldn't even get the first harvest (planted on startDay), calculate initial cost loss.
+            // This check might need refinement if startDay + growthTime > totalDaysInPeriod
+            if (cycle === 0) { // Check if it's before the *first* potential harvest
+                 cumulativeProfit = -numericInitialCrops * seedCost; // Use numeric value
             }
-            
-            // Calculate profit for all harvests of these crops
-            var singleHarvestOptions = JSON.parse(JSON.stringify(options));
-            singleHarvestOptions.planted = currentCrops;
-            singleHarvestOptions.days = options.days - currentDay + growthTime + 1; // Remaining days plus growth time
-            
-            // Create a temporary crop with just one harvest to calculate profit
-            var tempCrop = JSON.parse(JSON.stringify(crop));
-            tempCrop.harvests = harvestCount;
-            
-            // Calculate profit using the standard profit function
-            var tempOptions = options;
-            options = singleHarvestOptions;
-            var profitData = profit(tempCrop);
-            options = tempOptions;
-            
-            harvestProfit = profitData.profit;
+            break; // Exit loop, no more harvests possible
+        }
+
+        // Calculate value of this harvest using the average sell price
+        var harvestValue = currentCrops * averageSellPrice;
+        // Calculate the cost of seeds *required* to get this harvest (planted in the previous cycle or initially)
+        // For the very first cycle (cycle 1), the cost corresponds to the initial planting.
+        // For subsequent cycles, it's the cost of seeds bought in the *previous* cycle's reinvestment phase.
+        // The cumulativeProfit approach handles this implicitly.
+
+        // Add the harvest value to the cumulative profit pool
+        cumulativeProfit += harvestValue;
+
+        // --- Reinvestment & Next Cycle Logic ---
+        var buyableSeeds = 0;
+        var replantCost = 0;
+        var nextPlantDay = harvestDay; // Plant on the same day as harvest
+        var nextGrowthTime = getGrowthTime(crop, fertilizer); // Recalculate just in case, though likely constant
+        var nextHarvestDay = nextPlantDay + nextGrowthTime;
+        var stopExpansion = false;
+
+        // Check if the max crop limit is reached (if applicable)
+        // Check *before* calculating buyable seeds for the *next* cycle.
+        if (options.maxExpansionCrops > 0 && (totalSeedsPurchased + Math.floor(cumulativeProfit / seedCost)) >= options.maxExpansionCrops) {
+             // If buying *any* more seeds would exceed the limit, calculate how many we *can* buy without exceeding.
+             var remainingCapacity = options.maxExpansionCrops - totalSeedsPurchased;
+             buyableSeeds = Math.min(Math.floor(cumulativeProfit / seedCost), remainingCapacity);
+             if (buyableSeeds < 0) buyableSeeds = 0; // Ensure it's not negative
+             replantCost = buyableSeeds * seedCost;
+             if (replantCost <= cumulativeProfit) {
+                 cumulativeProfit -= replantCost;
+                 totalSeedsPurchased += buyableSeeds;
+             } else {
+                 // Cannot afford even the limited number of seeds
+                 buyableSeeds = 0;
+                 replantCost = 0;
+             }
+             stopExpansion = true; // Stop after this potential limited reinvestment
+        } else if (nextHarvestDay <= totalDaysInPeriod) {
+            // If limit not reached AND we can plant again before season ends:
+            // How many seeds can we afford with the current cumulative profit?
+            buyableSeeds = Math.floor(cumulativeProfit / seedCost);
+            if (buyableSeeds > 0) {
+                replantCost = buyableSeeds * seedCost;
+                // Deduct the cost of purchased seeds from the cumulative profit
+                cumulativeProfit -= replantCost;
+                totalSeedsPurchased += buyableSeeds; // Add to the total count of seeds bought
+            } else {
+                // Can't afford any seeds for the next cycle
+                stopExpansion = true;
+            }
         } else {
-            // For non-regrowable crops, just calculate one harvest
-            var singleHarvestOptions = JSON.parse(JSON.stringify(options));
-            singleHarvestOptions.planted = currentCrops;
-            singleHarvestOptions.days = growthTime; // Just enough days for one harvest
-            
-            // Create a temporary crop with just one harvest to calculate profit
-            var tempCrop = JSON.parse(JSON.stringify(crop));
-            tempCrop.harvests = 1;
-            
-            // Calculate profit using the standard profit function
-            var tempOptions = options;
-            options = singleHarvestOptions;
-            var profitData = profit(tempCrop);
-            options = tempOptions;
-            
-            harvestProfit = profitData.profit;
-            
-            // For non-regrowable crops, we need to plant again, so advance the day
-            currentDay += growthTime;
+            // Cannot plant again before season ends
+            stopExpansion = true;
         }
-        
-        // Add this harvest's profit to total
-        totalProfit += harvestProfit;
-        cycleData.profit = harvestProfit;
-        
-        // Calculate how many new crops can be planted
-        var newCrops = calculateNewCrops(harvestProfit, crop);
-        cycleData.newCrops = newCrops;
-        
-        // Check if there's enough time to grow new crops
-        if (newCrops > 0 && canPlantNewCrop(crop, currentDay, fertilizer)) {
-            currentCrops += newCrops;
-            expansionData.totalCropsPlanted += newCrops;
+
+        // Store data for this cycle
+        expansionData.cycles.push({
+            cycle: cycle + 1, // Use cycle + 1 for 1-based indexing in display
+            day: harvestDay, // Day the harvest happens
+            cropsHarvested: currentCrops, // Crops harvested this cycle
+            goldAfterReinvest: cumulativeProfit, // Gold *after* potential reinvestment for next cycle
+            seedsForNextCycle: stopExpansion ? 0 : buyableSeeds // Seeds bought for next cycle (0 if stopping)
+        });
+
+        // If stopping expansion (due to limit, end of season, or affordability), break the loop
+        if (stopExpansion) {
+            break;
         }
-        
-        expansionData.cycles.push(cycleData);
-        
-        // If no new crops were planted, break the loop
-        if (newCrops <= 0) break;
+
+        // Prepare for the next cycle
+        currentCrops = buyableSeeds;
+        currentDay = nextPlantDay; // Advance day to the planting day
+        cycle++; // Increment cycle counter *after* processing the current cycle
     }
-    
-    expansionData.finalProfit = totalProfit;
+
+    // Final profit is the cumulative profit after the last possible harvest and reinvestment attempt
+    expansionData.finalProfit = cumulativeProfit;
+    expansionData.totalCropsPlanted = totalSeedsPurchased; // Update total planted count
+
+    // Sanity check: If no cycles completed, profit should be negative seed cost or 0 if planting failed.
+    if (expansionData.cycles.length === 0 && numericInitialCrops > 0) {
+         // Check if planting was even possible
+         var initialGrowthTime = getGrowthTime(crop, fertilizer);
+         if (startDay + initialGrowthTime > totalDaysInPeriod) {
+             // Could not even grow the initial batch
+             expansionData.finalProfit = -numericInitialCrops * seedCost;
+         } else {
+             // Grew initial batch but couldn't reinvest (or loop broke early)
+             // The cumulativeProfit should reflect this, but double-check logic if issues arise.
+             // If cumulativeProfit wasn't updated correctly in the zero-cycle case, set it here.
+             // This might occur if the break happened before the first cumulativeProfit += harvestValue
+             // Let's ensure the initial cost is accounted for if no harvest value was added.
+             if (cumulativeProfit == 0) { // Assuming it starts at 0 and wasn't updated
+                expansionData.finalProfit = -numericInitialCrops * seedCost;
+             }
+         }
+    } else if (numericInitialCrops === 0) {
+         expansionData.finalProfit = 0; // Can't plant, no profit/loss
+    }
+    // Removed the extra closing brace that was here
+
+
     return expansionData;
 }
 
@@ -735,22 +790,50 @@ function valueCrops() {
             cropList[i].produce.extraPerc += 0.2;
         }
 		cropList[i].planted = planted(cropList[i]);
-		cropList[i].harvests = harvests(cropList[i].id);
-		cropList[i].seedLoss = seedLoss(cropList[i]);
-		cropList[i].fertLoss = fertLoss(cropList[i]);
+		cropList[i].harvests = harvests(cropList[i].id); // Keep original harvest count for info
+		cropList[i].seedLoss = seedLoss(cropList[i]); // Keep original seed loss for info/comparison
+		cropList[i].fertLoss = fertLoss(cropList[i]); // Keep original fert loss for info/comparison
+
 		// Calculate profit based on whether farm expansion is enabled
-		if (options.expansion && options.buySeed) {
+		if (options.expansion && options.buySeed && cropList[i].growth.regrow <= 0 && minSeedCost(cropList[i]) > 0) {
+            // Use the new expansion calculation only if enabled, buying seeds, not regrowable, and seeds have a cost
 			var expansionData = calculateFarmExpansion(cropList[i]);
-			cropList[i].profitData = profit(cropList[i]);
+            // Store the detailed profit breakdown from the standard calculation for tooltip reference if needed
+            cropList[i].profitData = profit(cropList[i]); // Note: profitData might still be useful for raw value display
+            // The main profit value comes from the expansion simulation
 			cropList[i].profit = expansionData.finalProfit;
 			cropList[i].expansionData = expansionData;
+
+            // --- Recalculate Seed Loss, Net Expenses, and ROI for Expansion Mode ---
+            // Correct Seed Loss based on *total* seeds purchased during expansion
+            cropList[i].seedLoss = -expansionData.totalCropsPlanted * minSeedCost(cropList[i]);
+            // Net Expenses = Total Seed Loss + Total Fertilizer Loss (Fert loss is only applied once initially)
+            // NOTE: fertLoss is already negative, so we add it.
+            cropList[i].netExpenses = cropList[i].seedLoss + cropList[i].fertLoss;
+
+            // Recalculate ROI based on expansion profit and *total* expenses
+            if (cropList[i].netExpenses < 0) { // Check if there were any expenses
+                 cropList[i].totalReturnOnInvestment = 100 * (expansionData.finalProfit / (-cropList[i].netExpenses)); // Use the absolute value of expenses
+                 cropList[i].averageReturnOnInvestment = cropList[i].totalReturnOnInvestment / options.days;
+            } else {
+                 // If no expenses (e.g., free seeds, no fertilizer), ROI is infinite if profit > 0, else 0
+                 cropList[i].totalReturnOnInvestment = (expansionData.finalProfit > 0) ? Infinity : 0;
+                 cropList[i].averageReturnOnInvestment = (expansionData.finalProfit > 0) ? Infinity : 0;
+            }
+            // cropList[i].netExpenses is already updated above
+
 		} else {
+            // Use standard profit calculation otherwise (no expansion or not applicable)
 			cropList[i].profitData = profit(cropList[i]);
 			cropList[i].profit = cropList[i].profitData.profit;
+            cropList[i].expansionData = null; // No expansion data available/applicable
+            // Use ROI calculated by the standard profit function
+            cropList[i].totalReturnOnInvestment = cropList[i].profitData.totalReturnOnInvestment;
+            cropList[i].averageReturnOnInvestment = cropList[i].profitData.averageReturnOnInvestment;
+            cropList[i].netExpenses = cropList[i].profitData.netExpenses;
 		}
-		cropList[i].totalReturnOnInvestment = cropList[i].profitData.totalReturnOnInvestment;
-		cropList[i].averageReturnOnInvestment = cropList[i].profitData.averageReturnOnInvestment;
-		cropList[i].netExpenses = cropList[i].profitData.netExpenses;
+
+		// Keep the rest of the drawing logic the same, using the calculated 'profit' value
 		cropList[i].averageProfit = perDay(cropList[i].profit);
 		cropList[i].averageSeedLoss = perDay(cropList[i].seedLoss);
 		cropList[i].averageFertLoss = perDay(cropList[i].fertLoss);
@@ -1265,9 +1348,13 @@ function renderGraph() {
 					expansionTr.append("td").attr("class", "tooltipTdRight").text(d.expansionData.totalCropsPlanted);
 					
 					expansionTr = expansionTable.append("tr");
+					expansionTr.append("td").attr("class", "tooltipTdLeft").text("Max Crops Setting:");
+					expansionTr.append("td").attr("class", "tooltipTdRight").text(options.maxExpansionCrops > 0 ? options.maxExpansionCrops : "Unlimited");
+
+					expansionTr = expansionTable.append("tr");
 					expansionTr.append("td").attr("class", "tooltipTdLeft").text("Expansion cycles:");
 					expansionTr.append("td").attr("class", "tooltipTdRight").text(d.expansionData.cycles.length);
-					
+
 					// Show details for each expansion cycle
 					if (d.expansionData.cycles.length > 0) {
 						var cyclesTable = tooltip.append("table")
@@ -1276,26 +1363,22 @@ function renderGraph() {
 						
 						var headerTr = cyclesTable.append("tr");
 						headerTr.append("td").attr("class", "tooltipTdLeft").text("Cycle");
-						headerTr.append("td").attr("class", "tooltipTdRight").text("Day");
-						headerTr.append("td").attr("class", "tooltipTdRight").text("Crops");
-						headerTr.append("td").attr("class", "tooltipTdRight").text("Profit");
-						headerTr.append("td").attr("class", "tooltipTdRight").text("New Crops");
-						
-						for (var i = 0; i < Math.min(d.expansionData.cycles.length, 5); i++) {
-							var cycle = d.expansionData.cycles[i];
+						headerTr.append("td").attr("class", "tooltipTdRight").text("Harvest Day");
+						headerTr.append("td").attr("class", "tooltipTdRight").text("Harvested"); // Crops harvested this cycle
+						headerTr.append("td").attr("class", "tooltipTdRight").text("Gold After Reinvest"); // Gold left after buying next seeds
+						headerTr.append("td").attr("class", "tooltipTdRight").text("Seeds For Next"); // Seeds bought for next cycle
+
+						// Show ALL cycles, not just the first 5
+						for (var i = 0; i < d.expansionData.cycles.length; i++) {
+							var cycleData = d.expansionData.cycles[i];
 							var cycleTr = cyclesTable.append("tr");
-							cycleTr.append("td").attr("class", "tooltipTdLeft").text(i + 1);
-							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycle.day);
-							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycle.cropsPlanted);
-							cycleTr.append("td").attr("class", "tooltipTdRight").text(formatNumber(cycle.profit));
-							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycle.newCrops);
+							cycleTr.append("td").attr("class", "tooltipTdLeft").text(cycleData.cycle);
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycleData.day); // Harvest day
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycleData.cropsHarvested); // Crops harvested this cycle
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(formatNumber(cycleData.goldAfterReinvest)); // Gold left after buying next seeds
+							cycleTr.append("td").attr("class", "tooltipTdRight").text(cycleData.seedsForNextCycle); // Seeds bought for next cycle
 						}
-						
-						// If there are more than 5 cycles, show a message
-						if (d.expansionData.cycles.length > 5) {
-							var moreTr = cyclesTable.append("tr");
-							moreTr.append("td").attr("class", "tooltipTdLeft").attr("colspan", 5).text("... and " + (d.expansionData.cycles.length - 5) + " more cycles");
-						}
+						// Removed the "... and X more cycles" message
 					}
 				}
 
@@ -1752,29 +1835,21 @@ function updateData() {
     options.nextyear = document.getElementById('check_nextyear').checked;
 
     options.expansion = document.getElementById('check_expansion').checked;
-    
-    var tr_expansion_cyclesID = document.getElementById('tr_expansion_cycles');
-    var tr_reinvestment_percentID = document.getElementById('tr_reinvestment_percent');
-    
+
+    var tr_max_expansion_cropsID = document.getElementById('tr_max_expansion_crops');
+
     if (options.expansion) {
-        tr_expansion_cyclesID.classList.remove('hidden');
-        tr_reinvestment_percentID.classList.remove('hidden');
+        tr_max_expansion_cropsID.classList.remove('hidden');
     } else {
-        tr_expansion_cyclesID.classList.add('hidden');
-        tr_reinvestment_percentID.classList.add('hidden');
+        tr_max_expansion_cropsID.classList.add('hidden');
     }
-    
-    if (document.getElementById('expansion_cycles').value < 1)
-        document.getElementById('expansion_cycles').value = 1;
-    if (document.getElementById('expansion_cycles').value > 100)
-        document.getElementById('expansion_cycles').value = 100;
-    options.expansionCycles = parseInt(document.getElementById('expansion_cycles').value);
-    
-    if (document.getElementById('reinvestment_percent').value < 1)
-        document.getElementById('reinvestment_percent').value = 1;
-    if (document.getElementById('reinvestment_percent').value > 100)
-        document.getElementById('reinvestment_percent').value = 100;
-    options.reinvestmentPercentage = parseInt(document.getElementById('reinvestment_percent').value);
+
+    if (document.getElementById('max_expansion_crops').value < 0)
+        document.getElementById('max_expansion_crops').value = 0;
+    options.maxExpansionCrops = parseInt(document.getElementById('max_expansion_crops').value);
+    if (isNaN(options.maxExpansionCrops)) {
+        options.maxExpansionCrops = 0; // Default to 0 if input is invalid
+    }
 
     if (document.getElementById('number_planted').value <= 0)
         document.getElementById('number_planted').value = 1;
@@ -1984,12 +2059,9 @@ function optionsLoad() {
     
     options.expansion = validBoolean(options.expansion);
     document.getElementById('check_expansion').checked = options.expansion;
-    
-    options.expansionCycles = validIntRange(1, 100, options.expansionCycles);
-    document.getElementById('expansion_cycles').value = options.expansionCycles;
-    
-    options.reinvestmentPercentage = validIntRange(1, 100, options.reinvestmentPercentage);
-    document.getElementById('reinvestment_percent').value = options.reinvestmentPercentage;
+
+    options.maxExpansionCrops = validIntRange(0, MAX_INT, options.maxExpansionCrops); // Min is 0
+    document.getElementById('max_expansion_crops').value = options.maxExpansionCrops;
 
 	options.fertilizer = validIntRange(0, 6, options.fertilizer);
 	document.getElementById('select_fertilizer').value = options.fertilizer;
