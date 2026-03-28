@@ -364,11 +364,44 @@ function isFestivalDay(absDay) {
 
 /*
  * Returns the next relative day that is not a festival/shop-closed day, at or after relDay.
+ * Used for the initial planting (seeds already owned — only festivals block planting).
  * @param relDay Starting relative day.
- * @return Same or later relative day that is open for shopping/planting.
+ * @return Same or later relative day that is open for planting.
  */
 function nextShopOpenDay(relDay) {
     while (isFestivalDay(relToAbsDay(relDay))) relDay++;
+    return relDay;
+}
+
+/*
+ * Returns true if seeds for this crop can be purchased on the given absolute day.
+ * Accounts for festival closures, Pierre's Wednesday closure, and whether Pierre/Joja
+ * actually sell this crop (special-only crops like Strawberry return false).
+ * @param crop The crop object.
+ * @param absDay Absolute season day.
+ * @return True if at least one checked seed source is available on this day.
+ */
+function canBuySeedsOnDay(crop, absDay) {
+    if (isFestivalDay(absDay)) return false;
+    var wednesday = (absDay % 7 === 3);
+    // Pierre sells this crop, Pierre is checked, and Pierre is open (closed Wednesdays)
+    if (crop.seeds.pierre > 0 && options.seeds.pierre && !wednesday) return true;
+    // Joja sells this crop, Joja is checked, and it's not a festival day (already checked above)
+    if (crop.seeds.joja > 0 && options.seeds.joja) return true;
+    // Special-only seeds (e.g. Egg Festival) are not available for on-demand re-purchase
+    return false;
+}
+
+/*
+ * Returns the next relative day at or after relDay where seeds for this crop can be bought.
+ * If no such day exists within the calculation period, returns a day beyond totalDays.
+ * @param crop The crop object.
+ * @param relDay Starting relative day.
+ * @return Relative day when seeds can next be purchased.
+ */
+function nextSeedBuyDay(crop, relDay) {
+    var maxDay = parseInt(options.days) + 1;
+    while (relDay <= maxDay && !canBuySeedsOnDay(crop, relToAbsDay(relDay))) relDay++;
     return relDay;
 }
 
@@ -480,7 +513,7 @@ function calcExpansionCycles(crop) {
             // Tea blooms every day in the last 7 days of each 28-day period — no expansion
             cycles.push({
                 type: 'plant', day: plantDay1, absDay: relToAbsDay(plantDay1),
-                crops: n0, cost: cost0, revenue: 0, balance: money,
+                crops: n0, cost: cost0, revenue: 0, balance: money, batchId: 0,
                 closedNote: plantDay1 > 1 ? "delayed (festival)" : ""
             });
 
@@ -492,23 +525,27 @@ function calcExpansionCycles(crop) {
                     money += rev;
                     cycles.push({
                         type: 'harvest', isRegrow: true, day: d, absDay: absD,
-                        crops: n0, cost: 0, revenue: rev, balance: money,
+                        crops: n0, cost: 0, revenue: rev, balance: money, batchId: 0,
                         closedNote: ""
                     });
                 }
             }
         } else {
-            // Multi-batch regrowing: after each harvest, try to plant additional tiles
+            // Multi-batch regrowing: after each harvest, try to plant additional tiles.
+            // Each new planting is an independent batch; all batches remain alive until end of season.
             var regrowDays = crop.growth.regrow;
             var allEvents = [];
-            var batches = []; // { tiles, nextHarvestDay, isFirstHarvest }
+            var batches = []; // { tiles, nextHarvestDay, isFirstHarvest, batchId }
+            var batchCounter = 0;
+            var peakTiles = n0;
 
             allEvents.push({
                 type: 'plant', day: plantDay1, absDay: relToAbsDay(plantDay1),
-                crops: n0, cost: cost0, revenue: 0, balance: money,
+                crops: n0, cost: cost0, revenue: 0, balance: money, batchId: batchCounter,
                 closedNote: plantDay1 > 1 ? "delayed (festival)" : ""
             });
-            batches.push({ tiles: n0, nextHarvestDay: plantDay1 + growDays, isFirstHarvest: true });
+            batches.push({ tiles: n0, nextHarvestDay: plantDay1 + growDays, isFirstHarvest: true, batchId: batchCounter });
+            batchCounter++;
 
             while (batches.length > 0) {
                 // Find earliest harvest day across all active batches
@@ -525,12 +562,12 @@ function calcExpansionCycles(crop) {
                         allEvents.push({
                             type: 'harvest', isRegrow: !b.isFirstHarvest,
                             day: minDay, absDay: relToAbsDay(minDay),
-                            crops: b.tiles, cost: 0, revenue: rev, balance: money,
+                            crops: b.tiles, cost: 0, revenue: rev, balance: money, batchId: b.batchId,
                             closedNote: ""
                         });
                         var nextHDay = minDay + regrowDays;
                         if (nextHDay <= totalDays) {
-                            survivingBatches.push({ tiles: b.tiles, nextHarvestDay: nextHDay, isFirstHarvest: false });
+                            survivingBatches.push({ tiles: b.tiles, nextHarvestDay: nextHDay, isFirstHarvest: false, batchId: b.batchId });
                         }
                     } else {
                         survivingBatches.push(b);
@@ -543,8 +580,9 @@ function calcExpansionCycles(crop) {
                 var roomUnderCap = capTiles > 0 ? Math.max(0, capTiles - totalActiveTiles) : Infinity;
 
                 if (roomUnderCap > 0) {
-                    var newPlantDay = nextShopOpenDay(minDay);
-                    if (newPlantDay + growDays <= totalDays) {
+                    // Need to buy seeds for new batch — check Pierre/Joja availability
+                    var newPlantDay = nextSeedBuyDay(crop, minDay);
+                    if (newPlantDay <= totalDays && newPlantDay + growDays <= totalDays) {
                         var newTiles;
                         if (costPerTile === 0) {
                             newTiles = isFinite(roomUnderCap) ? roomUnderCap : 0;
@@ -557,12 +595,19 @@ function calcExpansionCycles(crop) {
                         if (newTiles > 0) {
                             var newCost = newTiles * costPerTile;
                             money -= newCost;
+                            var newClosedNote = newPlantDay > minDay
+                                ? (isFestivalDay(relToAbsDay(minDay)) ? "delayed (festival)" : "delayed (shop closed)")
+                                : "";
                             allEvents.push({
                                 type: 'plant', day: newPlantDay, absDay: relToAbsDay(newPlantDay),
-                                crops: newTiles, cost: newCost, revenue: 0, balance: money,
-                                closedNote: newPlantDay > minDay ? "delayed (festival)" : ""
+                                crops: newTiles, cost: newCost, revenue: 0, balance: money, batchId: batchCounter,
+                                closedNote: newClosedNote
                             });
-                            batches.push({ tiles: newTiles, nextHarvestDay: newPlantDay + growDays, isFirstHarvest: true });
+                            batches.push({ tiles: newTiles, nextHarvestDay: newPlantDay + growDays, isFirstHarvest: true, batchId: batchCounter });
+                            batchCounter++;
+                            // Track peak: sum of all now-active batches
+                            var runningTotal = batches.reduce(function(s, b) { return s + b.tiles; }, 0);
+                            if (runningTotal > peakTiles) peakTiles = runningTotal;
                         }
                     }
                 }
@@ -576,12 +621,15 @@ function calcExpansionCycles(crop) {
                 return 0;
             });
 
+            allEvents.peakTiles = peakTiles;
             cycles = allEvents;
         }
     } else {
         // Non-regrowing crop: plant → harvest → reinvest → repeat, expanding tiles each cycle.
         var rawPlantDay = 1;
+        // First planting: seeds already owned, only skip festival days
         var plantRelDay = nextShopOpenDay(rawPlantDay);
+        var cycleBatchId = 0;
         while (plantRelDay <= totalDays) {
             var harvestRelDay = plantRelDay + growDays;
             if (harvestRelDay > totalDays) break;
@@ -590,14 +638,14 @@ function calcExpansionCycles(crop) {
             if (n <= 0) break;
 
             var plantAbsDay = relToAbsDay(plantRelDay);
-            var closedNote = plantRelDay > rawPlantDay ? "delayed (festival)" : "";
+            var closedNote = plantRelDay > rawPlantDay ? (isFestivalDay(relToAbsDay(rawPlantDay)) ? "delayed (festival)" : "delayed (shop closed)") : "";
             var cost = n * costPerTile;
             money -= cost;
             isFirstPlanting = false;
 
             cycles.push({
                 type: 'plant', day: plantRelDay, absDay: plantAbsDay,
-                crops: n, cost: cost, revenue: 0, balance: money,
+                crops: n, cost: cost, revenue: 0, balance: money, batchId: cycleBatchId,
                 closedNote: closedNote
             });
 
@@ -606,12 +654,14 @@ function calcExpansionCycles(crop) {
 
             cycles.push({
                 type: 'harvest', day: harvestRelDay, absDay: relToAbsDay(harvestRelDay),
-                crops: n, cost: 0, revenue: rev, balance: money,
+                crops: n, cost: 0, revenue: rev, balance: money, batchId: cycleBatchId,
                 closedNote: ""
             });
 
+            cycleBatchId++;
             rawPlantDay = harvestRelDay;
-            plantRelDay = nextShopOpenDay(rawPlantDay);
+            // Subsequent plantings: need to actually buy seeds — check Pierre/Joja availability
+            plantRelDay = nextSeedBuyDay(crop, rawPlantDay);
         }
     }
 
@@ -2280,8 +2330,12 @@ function renderExpansionTable(cropListIndex) {
     var harvestCycles = cycles.filter(function(c) { return c.type === 'harvest'; }).length;
 
     var capTiles = parseInt(options.expansionCap) || 0;
-    var maxTilesReached = cycles.filter(function(c) { return c.type === 'plant'; })
-                                .reduce(function(m, c) { return Math.max(m, c.crops); }, 0);
+    // For regrowing crops, peak = sum of all simultaneously active batches (stored during simulation).
+    // For non-regrowing crops, only one batch is ever active at a time, so max single plant is correct.
+    var maxTilesReached = cycles.peakTiles !== undefined
+        ? cycles.peakTiles
+        : cycles.filter(function(c) { return c.type === 'plant'; })
+                .reduce(function(m, c) { return Math.max(m, c.crops); }, 0);
 
     var html = '<div class="exp-summary">';
     html += '<span class="exp-stat">Start: <b>' + parseInt(options.planted) + '</b> tiles</span>';
@@ -2310,6 +2364,8 @@ function renderExpansionTable(cropListIndex) {
     html += '<th>Revenue</th><th>Balance</th>';
     html += '</tr></thead><tbody>';
 
+    var batchColors = ['#e05c5c','#5aaae0','#50c87a','#e0c840','#b060e0','#e08830','#40c8c0','#d06090'];
+
     var cycleNum = 0;
     var plantCycleNum = 0;
     for (var i = 0; i < cycles.length; i++) {
@@ -2323,7 +2379,11 @@ function renderExpansionTable(cropListIndex) {
         html += '<tr class="' + rowClass + '">';
         html += '<td>' + cycleNum + '</td>';
         html += '<td>' + formatExpansionDay(c.day) + (c.closedNote ? ' <span class="exp-note">' + c.closedNote + '</span>' : '') + '</td>';
-        html += '<td>' + (isPlant ? '&#x1F331; Plant' : (isRegrow ? '&#x1F504; Regrow' : '&#x1F33E; Harvest')) + '</td>';
+
+        var batchDot = c.batchId !== undefined
+            ? '<span class="exp-batch-dot" style="background:' + batchColors[c.batchId % batchColors.length] + '"></span>'
+            : '';
+        html += '<td>' + batchDot + (isPlant ? '&#x1F331; Plant' : (isRegrow ? '&#x1F504; Regrow' : '&#x1F33E; Harvest')) + '</td>';
         html += '<td>' + c.crops + '</td>';
         if (totalCost > 0) {
             html += '<td>' + (c.cost > 0 ? '<span class="exp-neg">-' + formatNumber(c.cost) + '</span><div class="gold"></div>' : '—') + '</td>';

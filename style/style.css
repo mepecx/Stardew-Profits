@@ -577,6 +577,16 @@ td input[type="checkbox"]:disabled{
 .exp-neg { color: #ff6666; }
 .exp-balance { color: #88ccff; }
 
+.exp-batch-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 5px;
+    vertical-align: middle;
+    flex-shrink: 0;
+}
+
 .exp-note {
     font-size: 0.8em;
     color: #aaaaaa;
