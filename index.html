@@ -21,6 +21,16 @@
 			<script src="js/main.js"> </script>
 		</div>
 
+        <div id="expansion-panel" class="hidden">
+            <div class="exp-header">
+                <span class="exp-title">&#x1F33E; Expansion Mode &mdash; Cycle Breakdown</span>
+                <span class="exp-crop-select-label">Crop:</span>
+                <select id="expansion_crop_select" onchange="renderExpansionTable(parseInt(this.value))"></select>
+                <span class="exp-legend"><span class="exp-legend-plant">&#x1F331; Plant</span> <span class="exp-legend-harvest">&#x1F33E; Harvest</span> <span class="exp-legend-festival">&#x2605; Festival Day (shop closed, planting delayed)</span></span>
+            </div>
+            <div id="expansion_table_container"></div>
+        </div>
+
 		<div class="options">
 		<table cellspacing="2" style="height: 0;">
 
@@ -252,6 +262,16 @@
 			<tr>
 				<td>Show Extra Info:</td>
 				<td><input type="checkbox" id="check_extra" onChange="refresh()" checked="true" /></td>
+			</tr>
+
+			<tr>
+				<td>Expansion Mode:</td>
+				<td><input type="checkbox" id="expansion_mode" onChange="rebuild()" /></td>
+			</tr>
+
+			<tr class="expansion-mode-row hidden">
+				<td>Max Tile Cap:</td>
+				<td><input type="number" id="expansion_cap" value="0" onChange="refresh()"/> <label style="font-size:0.75em;opacity:0.7;">(0 = no cap)</label></td>
 			</tr>
 
 			<tr>

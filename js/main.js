@@ -51,6 +51,14 @@ var barsTooltips;
 var options;
 var MAX_INT = Number.MAX_SAFE_INTEGER || Number.MAX_VALUE;
 
+// Festival days when shops are closed and planting is not possible
+var festivalDaysBySeason = {
+    0: [13, 24],  // Spring: Egg Festival, Flower Dance
+    1: [11, 28],  // Summer: Luau, Dance of the Moonlight Jellies
+    2: [16, 27],  // Fall: Stardew Valley Fair, Spirit's Eve
+    3: [8, 25]    // Winter: Festival of Ice, Feast of the Winter Star
+};
+
 /*
  * Formats a specified number, adding separators for thousands.
  * @param num The number to format.
@@ -323,6 +331,242 @@ function getMillModifier(crop) {
     return modifier;
 }
 
+
+/*
+ * Converts a relative day (1 = first day of calculation period) to absolute season day.
+ * @param relDay Relative day within calculation period.
+ * @return Absolute day (1-indexed within the overall period starting from season day 1).
+ */
+function relToAbsDay(relDay) {
+    if (options.season == 4) return relDay;
+    var offset = options.crossSeason ? 56 - options.days : 28 - options.days;
+    return offset + relDay;
+}
+
+/*
+ * Checks if an absolute season day is a shop-closed festival day.
+ * @param absDay Absolute day (1-indexed, within 1-56 range for cross-season).
+ * @return True if the day is a festival day.
+ */
+function isFestivalDay(absDay) {
+    if (options.season == 4) return false;
+    var dayOfSeason, seasonIdx;
+    if (absDay <= 28) {
+        dayOfSeason = absDay;
+        seasonIdx = options.season;
+    } else {
+        dayOfSeason = absDay - 28;
+        seasonIdx = (options.season + 1) % 4;
+    }
+    var festivals = festivalDaysBySeason[seasonIdx];
+    return festivals ? festivals.indexOf(dayOfSeason) !== -1 : false;
+}
+
+/*
+ * Returns the next relative day that is not a festival/shop-closed day, at or after relDay.
+ * @param relDay Starting relative day.
+ * @return Same or later relative day that is open for shopping/planting.
+ */
+function nextShopOpenDay(relDay) {
+    while (isFestivalDay(relToAbsDay(relDay))) relDay++;
+    return relDay;
+}
+
+/*
+ * Calculates the number of growth days for a crop (from planting to first harvest).
+ * @param crop The crop object.
+ * @return Number of days to first harvest.
+ */
+function cropGrowDays(crop) {
+    var fert = fertilizers[options.fertilizer];
+    if (options.skills.agri)
+        return Math.floor(crop.growth.initial * (fert.growth - 0.1));
+    else
+        return Math.floor(crop.growth.initial * fert.growth);
+}
+
+/*
+ * Calculates the sell revenue from a single harvest of numPlanted crops.
+ * Uses the currently selected produce type and skills.
+ * @param crop The crop object.
+ * @param numPlanted Number of plants harvested.
+ * @return Revenue in gold.
+ */
+function singleHarvestRevenue(crop, numPlanted) {
+    var isTea = crop.name === "Tea Leaves";
+    var fert = fertilizers[options.fertilizer];
+    var lvl = crop.isWildseed ? options.foragingLevel : options.level;
+    var prob = crop.isWildseed
+        ? PredictForaging(options.foragingLevel, options.skills.botanist)
+        : Probability(lvl + options.foodLevel, fert.ratio, isTea);
+
+    var total = numPlanted * (1 + crop.produce.extraPerc * crop.produce.extra);
+    var useRaw = false;
+    switch (options.produce) {
+        case 1: if (!crop.produce.jarType)       useRaw = true; break;
+        case 2: if (!crop.produce.kegType)        useRaw = true; break;
+        case 4: if (!crop.produce.dehydratorType) useRaw = true; break;
+        case 5: if (!crop.produce.millType)       useRaw = true; break;
+    }
+
+    if (options.produce === 0 || useRaw) {
+        if (useRaw && !options.sellRaw) return 0;
+        return rawNetIncome(crop,
+            total * prob.regular, total * prob.silver,
+            total * prob.gold, total * prob.iridium);
+    }
+    if (options.produce === 1)
+        return total * (options.skills.arti ? (crop.produce.price*2+50)*1.4 : crop.produce.price*2+50);
+    if (options.produce === 2) {
+        if (crop.produce.kegType === "Pale Ale") return total * crop.produce.keg;
+        var km = getKegModifier(crop), cm = getCaskModifier();
+        return total * (options.aging !== 0 ? crop.produce.price * km * cm : crop.produce.price * km);
+    }
+    if (options.produce === 3) return 2 * total * crop.seeds.sell;
+    if (options.produce === 4) return Math.floor(total / 5) * getDehydratorModifier(crop);
+    if (options.produce === 5) return total * getMillModifier(crop);
+    return 0;
+}
+
+/*
+ * Returns the fertilizer cost per tile for a single planting.
+ */
+function fertCostPerPlant() {
+    if (!options.buyFert) return 0;
+    if (options.fertilizer === 4 && options.fertilizerSource === 1)
+        return fertilizers[4].alternate_cost;
+    return fertilizers[options.fertilizer].cost;
+}
+
+/*
+ * Simulates compound reinvestment planting cycles for a crop in Expansion Mode.
+ * @param crop The crop object (must have .id set).
+ * @return Array of cycle event objects: { type, day, absDay, crops, cost, revenue, balance, closedNote }
+ */
+function calcExpansionCycles(crop) {
+    var cycles = [];
+    var seedCost = minSeedCost(crop);
+    var fertCost = fertCostPerPlant();
+    var costPerTile = seedCost + fertCost;
+    // Cycle 1 always plants options.planted tiles; later cycles can grow up to expansionCap.
+    var initialTiles = parseInt(options.planted);
+    var capTiles = parseInt(options.expansionCap) || 0; // 0 = no cap
+    var totalDays = parseInt(options.days);
+    var isTea = crop.name === "Tea Leaves";
+    var growDays = cropGrowDays(crop);
+
+    // Starting capital: exactly enough to plant the initial batch.
+    var money = initialTiles * costPerTile;
+    var isFirstPlanting = true;
+
+    function numCanPlant() {
+        if (isFirstPlanting) return initialTiles;
+        if (costPerTile === 0) return capTiles > 0 ? capTiles : initialTiles;
+        var affordable = Math.floor(money / costPerTile);
+        return capTiles > 0 ? Math.min(capTiles, affordable) : affordable;
+    }
+
+    if (crop.growth.regrow > 0) {
+        // Regrowing / grow-then-regrow crop: plant once, then all regrow harvests.
+        // Expansion doesn't apply after planting (tiles are committed).
+        var rawPlantDay = 1;
+        var plantRelDay = nextShopOpenDay(rawPlantDay);
+        var plantAbsDay = relToAbsDay(plantRelDay);
+        var closedNote = plantRelDay > rawPlantDay ? "delayed (festival)" : "";
+        if (plantRelDay > totalDays) return cycles;
+
+        var firstHarvestRelDay = plantRelDay + growDays;
+        if (firstHarvestRelDay > totalDays) return cycles;
+
+        var n = initialTiles;
+        var cost = n * costPerTile;
+        money -= cost;
+
+        cycles.push({
+            type: 'plant', day: plantRelDay, absDay: plantAbsDay,
+            crops: n, cost: cost, revenue: 0, balance: money,
+            closedNote: closedNote
+        });
+
+        if (isTea) {
+            // Tea blooms every day in the last 7 days of each 28-day period
+            for (var d = firstHarvestRelDay; d <= totalDays; d++) {
+                var absD = relToAbsDay(d);
+                var dayInSeason = ((absD - 1) % 28) + 1;
+                if (dayInSeason > 21) {
+                    var rev = singleHarvestRevenue(crop, n);
+                    money += rev;
+                    cycles.push({
+                        type: 'harvest', day: d, absDay: absD,
+                        crops: n, cost: 0, revenue: rev, balance: money,
+                        closedNote: ""
+                    });
+                }
+            }
+        } else {
+            var hRelDay = firstHarvestRelDay;
+            while (hRelDay <= totalDays) {
+                var rev = singleHarvestRevenue(crop, n);
+                money += rev;
+                cycles.push({
+                    type: 'harvest', day: hRelDay, absDay: relToAbsDay(hRelDay),
+                    crops: n, cost: 0, revenue: rev, balance: money,
+                    closedNote: ""
+                });
+                hRelDay += crop.growth.regrow;
+            }
+        }
+    } else {
+        // Non-regrowing crop: plant → harvest → reinvest → repeat, expanding tiles each cycle.
+        var rawPlantDay = 1;
+        var plantRelDay = nextShopOpenDay(rawPlantDay);
+        while (plantRelDay <= totalDays) {
+            var harvestRelDay = plantRelDay + growDays;
+            if (harvestRelDay > totalDays) break;
+
+            var n = numCanPlant();
+            if (n <= 0) break;
+
+            var plantAbsDay = relToAbsDay(plantRelDay);
+            var closedNote = plantRelDay > rawPlantDay ? "delayed (festival)" : "";
+            var cost = n * costPerTile;
+            money -= cost;
+            isFirstPlanting = false;
+
+            cycles.push({
+                type: 'plant', day: plantRelDay, absDay: plantAbsDay,
+                crops: n, cost: cost, revenue: 0, balance: money,
+                closedNote: closedNote
+            });
+
+            var rev = singleHarvestRevenue(crop, n);
+            money += rev;
+
+            cycles.push({
+                type: 'harvest', day: harvestRelDay, absDay: relToAbsDay(harvestRelDay),
+                crops: n, cost: 0, revenue: rev, balance: money,
+                closedNote: ""
+            });
+
+            rawPlantDay = harvestRelDay;
+            plantRelDay = nextShopOpenDay(rawPlantDay);
+        }
+    }
+
+    return cycles;
+}
+
+/*
+ * Returns the total net profit from all expansion cycles for a crop.
+ * @param crop The crop object.
+ * @return Net profit (revenue - costs).
+ */
+function expansionTotalProfit(crop) {
+    var cycles = calcExpansionCycles(crop);
+    if (!cycles.length) return 0;
+    // Net profit = total revenue across all cycles minus total seed/fert costs
+    return cycles.reduce(function(acc, c) { return acc + c.revenue - c.cost; }, 0);
+}
 
 /*
  * Calculates the profit for a specified crop.
@@ -719,6 +963,16 @@ function valueCrops() {
 		cropList[i].averageProfit = perDay(cropList[i].profit);
 		cropList[i].averageSeedLoss = perDay(cropList[i].seedLoss);
 		cropList[i].averageFertLoss = perDay(cropList[i].fertLoss);
+
+        // In Expansion Mode, override the profit with expansion profit
+        if (options.expansionMode) {
+            cropList[i].profit = expansionTotalProfit(cropList[i]);
+            cropList[i].seedLoss = 0;
+            cropList[i].fertLoss = 0;
+            cropList[i].averageProfit = perDay(cropList[i].profit);
+            cropList[i].averageSeedLoss = 0;
+            cropList[i].averageFertLoss = 0;
+        }
 
 		if (options.average == 1) {
 			cropList[i].drawProfit = cropList[i].averageProfit;
@@ -1875,6 +2129,18 @@ function updateData() {
 	options.disableLinks = document.getElementById('disable_links').checked;
 	options.predictionModel = document.getElementById('predictionModel').checked;
 
+    options.expansionMode = document.getElementById('expansion_mode').checked;
+
+    var expansionRows = document.querySelectorAll('.expansion-mode-row');
+    for (var i = 0; i < expansionRows.length; i++) {
+        if (options.expansionMode) expansionRows[i].classList.remove('hidden');
+        else expansionRows[i].classList.add('hidden');
+    }
+
+    if (document.getElementById('expansion_cap').value < 0)
+        document.getElementById('expansion_cap').value = 0;
+    options.expansionCap = parseInt(document.getElementById('expansion_cap').value) || 0;
+
     updateSeasonNames();
 
 	// Persist the options object into the URL hash.
@@ -1883,6 +2149,141 @@ function updateData() {
 	fetchCrops();
 	valueCrops();
 	sortCrops();
+}
+
+// ======================== EXPANSION MODE PANEL ========================
+
+/*
+ * Formats a season day number as "Day X" or "Day X (Season)" for display.
+ * @param relDay Relative day in the calculation period.
+ * @return Formatted string.
+ */
+function formatExpansionDay(relDay) {
+    var absDay = relToAbsDay(relDay);
+    var seasonNames = ["Spring", "Summer", "Fall", "Winter"];
+    if (options.season == 4) return "Day " + relDay;
+    var dayOfSeason, seasonIdx;
+    if (absDay <= 28) {
+        dayOfSeason = absDay;
+        seasonIdx = options.season;
+    } else {
+        dayOfSeason = absDay - 28;
+        seasonIdx = (options.season + 1) % 4;
+    }
+    var label = seasonNames[seasonIdx] + " " + dayOfSeason;
+    if (isFestivalDay(absDay)) label += " ★";
+    return label;
+}
+
+/*
+ * Populates the crop selector in the expansion panel with the current season's crops.
+ */
+function populateExpansionCropSelector() {
+    var sel = document.getElementById('expansion_crop_select');
+    if (!sel) return;
+    sel.innerHTML = '';
+    for (var i = 0; i < cropList.length; i++) {
+        var opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = cropList[i].name;
+        sel.appendChild(opt);
+    }
+}
+
+/*
+ * Renders the expansion cycle table for the crop at cropListIndex in cropList.
+ * @param cropListIndex Index into the sorted cropList array.
+ */
+function renderExpansionTable(cropListIndex) {
+    var tableDiv = document.getElementById('expansion_table_container');
+    if (!tableDiv) return;
+    if (cropListIndex < 0 || cropListIndex >= cropList.length) {
+        tableDiv.innerHTML = '';
+        return;
+    }
+
+    var crop = cropList[cropListIndex];
+    var cycles = calcExpansionCycles(crop);
+
+    if (!cycles.length) {
+        tableDiv.innerHTML = '<p class="exp-no-data">No complete harvest cycles fit within the available days for this crop.</p>';
+        return;
+    }
+
+    // Summary stats
+    var totalRevenue = cycles.reduce(function(a, c) { return a + c.revenue; }, 0);
+    var totalCost = cycles.reduce(function(a, c) { return a + c.cost; }, 0);
+    var netProfit = totalRevenue - totalCost;
+    var plantCycles = cycles.filter(function(c) { return c.type === 'plant'; }).length;
+    var harvestCycles = cycles.filter(function(c) { return c.type === 'harvest'; }).length;
+
+    var capTiles = parseInt(options.expansionCap) || 0;
+    var maxTilesReached = cycles.filter(function(c) { return c.type === 'plant'; })
+                                .reduce(function(m, c) { return Math.max(m, c.crops); }, 0);
+
+    var html = '<div class="exp-summary">';
+    html += '<span class="exp-stat">Start: <b>' + parseInt(options.planted) + '</b> tiles</span>';
+    if (capTiles > 0)
+        html += '<span class="exp-stat">Cap: <b>' + capTiles + '</b> tiles</span>';
+    html += '<span class="exp-stat">Peak: <b>' + maxTilesReached + '</b> tiles</span>';
+    html += '<span class="exp-stat"><b>' + plantCycles + '</b> planting' + (plantCycles !== 1 ? 's' : '') + '</span>';
+    html += '<span class="exp-stat"><b>' + harvestCycles + '</b> harvest' + (harvestCycles !== 1 ? 's' : '') + '</span>';
+    html += '<span class="exp-stat">Total Revenue: <b class="exp-pos">+' + formatNumber(totalRevenue) + '</b><div class="gold"></div></span>';
+    if (totalCost > 0)
+        html += '<span class="exp-stat">Total Costs: <b class="exp-neg">-' + formatNumber(totalCost) + '</b><div class="gold"></div></span>';
+    html += '<span class="exp-stat">Net Profit: <b class="' + (netProfit >= 0 ? 'exp-pos' : 'exp-neg') + '">' + (netProfit >= 0 ? '+' : '') + formatNumber(netProfit) + '</b><div class="gold"></div></span>';
+    html += '</div>';
+
+    html += '<div class="exp-table-scroll"><table class="exp-table" cellspacing="0">';
+    html += '<thead><tr>';
+    html += '<th>#</th><th>Day</th><th>Action</th><th>Tiles</th>';
+    html += totalCost > 0 ? '<th>Cost</th>' : '';
+    html += '<th>Revenue</th><th>Balance</th>';
+    html += '</tr></thead><tbody>';
+
+    var cycleNum = 0;
+    var plantCycleNum = 0;
+    for (var i = 0; i < cycles.length; i++) {
+        var c = cycles[i];
+        cycleNum++;
+        var isPlant = c.type === 'plant';
+        if (isPlant) plantCycleNum++;
+
+        html += '<tr class="' + (isPlant ? 'exp-row-plant' : 'exp-row-harvest') + '">';
+        html += '<td>' + cycleNum + '</td>';
+        html += '<td>' + formatExpansionDay(c.day) + (c.closedNote ? ' <span class="exp-note">' + c.closedNote + '</span>' : '') + '</td>';
+        html += '<td>' + (isPlant ? '🌱 Plant' : '🌾 Harvest') + '</td>';
+        html += '<td>' + c.crops + '</td>';
+        if (totalCost > 0) {
+            html += '<td>' + (c.cost > 0 ? '<span class="exp-neg">-' + formatNumber(c.cost) + '</span><div class="gold"></div>' : '—') + '</td>';
+        }
+        html += '<td>' + (c.revenue > 0 ? '<span class="exp-pos">+' + formatNumber(c.revenue) + '</span><div class="gold"></div>' : '—') + '</td>';
+        html += '<td><span class="exp-balance">' + formatNumber(c.balance) + '</span><div class="gold"></div></td>';
+        html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+
+    tableDiv.innerHTML = html;
+}
+
+/*
+ * Updates the expansion panel: populates the crop selector and renders the table.
+ * Called whenever options change in expansion mode.
+ */
+function updateExpansionPanel() {
+    var panel = document.getElementById('expansion-panel');
+    if (!panel) return;
+
+    if (!options.expansionMode) {
+        panel.classList.add('hidden');
+        return;
+    }
+
+    panel.classList.remove('hidden');
+    populateExpansionCropSelector();
+    var sel = document.getElementById('expansion_crop_select');
+    var idx = sel ? parseInt(sel.value) || 0 : 0;
+    renderExpansionTable(idx);
 }
 
 /*
@@ -1901,6 +2302,7 @@ function refresh() {
 	updateData();
 	gTitle.selectAll("*").remove();
 	updateGraph();
+	updateExpansionPanel();
 }
 
 /*
@@ -2030,6 +2432,12 @@ function optionsLoad() {
 	document.getElementById('disable_links').checked = options.disableLinks;
 	document.getElementById('predictionModel').checked = options.predictionModel;
 
+    options.expansionMode = validBoolean(options.expansionMode);
+    document.getElementById('expansion_mode').checked = options.expansionMode;
+
+    options.expansionCap = validIntRange(0, MAX_INT, options.expansionCap);
+    document.getElementById('expansion_cap').value = options.expansionCap;
+
     updateSeasonNames();
 }
 
@@ -2072,6 +2480,7 @@ function rebuild() {
 
 	updateData();
 	renderGraph();
+	updateExpansionPanel();
 }
 
 document.addEventListener('DOMContentLoaded', initial);
