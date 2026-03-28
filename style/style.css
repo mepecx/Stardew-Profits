@@ -546,6 +546,7 @@ td input[type="checkbox"]:disabled{
 
 .exp-legend-plant { color: #88ff88; }
 .exp-legend-harvest { color: #ffdd88; }
+.exp-legend-regrow { color: #88ccff; }
 .exp-legend-festival { color: #aaaaaa; }
 
 .exp-summary {
@@ -634,9 +635,27 @@ td input[type="checkbox"]:disabled{
     background-color: #2a2410;
 }
 
+.exp-row-regrow {
+    background-color: #121a20;
+}
+
+.exp-row-regrow:hover {
+    background-color: #1a2830;
+}
+
 .exp-no-data {
     color: #aaaaaa;
     font-style: italic;
     text-align: center;
     padding: 20px;
+}
+
+.exp-warning {
+    color: #ffcc66;
+    font-size: 0.8em;
+    background: #2a2010;
+    border-left: 3px solid #ffcc66;
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin: 6px 0 8px 0;
 }

@@ -497,7 +497,7 @@ function calcExpansionCycles(crop) {
                     var rev = singleHarvestRevenue(crop, n);
                     money += rev;
                     cycles.push({
-                        type: 'harvest', day: d, absDay: absD,
+                        type: 'harvest', isRegrow: true, day: d, absDay: absD,
                         crops: n, cost: 0, revenue: rev, balance: money,
                         closedNote: ""
                     });
@@ -505,15 +505,17 @@ function calcExpansionCycles(crop) {
             }
         } else {
             var hRelDay = firstHarvestRelDay;
+            var harvestNum = 0;
             while (hRelDay <= totalDays) {
                 var rev = singleHarvestRevenue(crop, n);
                 money += rev;
                 cycles.push({
-                    type: 'harvest', day: hRelDay, absDay: relToAbsDay(hRelDay),
+                    type: 'harvest', isRegrow: harvestNum > 0, day: hRelDay, absDay: relToAbsDay(hRelDay),
                     crops: n, cost: 0, revenue: rev, balance: money,
                     closedNote: ""
                 });
                 hRelDay += crop.growth.regrow;
+                harvestNum++;
             }
         }
     } else {
@@ -2234,6 +2236,13 @@ function renderExpansionTable(cropListIndex) {
     html += '<span class="exp-stat">Net Profit: <b class="' + (netProfit >= 0 ? 'exp-pos' : 'exp-neg') + '">' + (netProfit >= 0 ? '+' : '') + formatNumber(netProfit) + '</b><div class="gold"></div></span>';
     html += '</div>';
 
+    // Warn when artisan processing time isn't modeled
+    var processingDelays = { 1: "~3 days (Jar)", 2: "~7 days (Keg)", 4: "~7 days (Dehydrator)" };
+    if (processingDelays[options.produce]) {
+        html += '<p class="exp-warning">&#9888; Artisan goods take ' + processingDelays[options.produce] +
+            ' to process before they can be sold. This delay is not modeled &mdash; actual cash is available later, so tile expansion will be slower than shown.</p>';
+    }
+
     html += '<div class="exp-table-scroll"><table class="exp-table" cellspacing="0">';
     html += '<thead><tr>';
     html += '<th>#</th><th>Day</th><th>Action</th><th>Tiles</th>';
@@ -2247,12 +2256,14 @@ function renderExpansionTable(cropListIndex) {
         var c = cycles[i];
         cycleNum++;
         var isPlant = c.type === 'plant';
+        var isRegrow = !isPlant && c.isRegrow;
         if (isPlant) plantCycleNum++;
 
-        html += '<tr class="' + (isPlant ? 'exp-row-plant' : 'exp-row-harvest') + '">';
+        var rowClass = isPlant ? 'exp-row-plant' : (isRegrow ? 'exp-row-regrow' : 'exp-row-harvest');
+        html += '<tr class="' + rowClass + '">';
         html += '<td>' + cycleNum + '</td>';
         html += '<td>' + formatExpansionDay(c.day) + (c.closedNote ? ' <span class="exp-note">' + c.closedNote + '</span>' : '') + '</td>';
-        html += '<td>' + (isPlant ? '🌱 Plant' : '🌾 Harvest') + '</td>';
+        html += '<td>' + (isPlant ? '&#x1F331; Plant' : (isRegrow ? '&#x1F504; Regrow' : '&#x1F33E; Harvest')) + '</td>';
         html += '<td>' + c.crops + '</td>';
         if (totalCost > 0) {
             html += '<td>' + (c.cost > 0 ? '<span class="exp-neg">-' + formatNumber(c.cost) + '</span><div class="gold"></div>' : '—') + '</td>';
@@ -2280,9 +2291,25 @@ function updateExpansionPanel() {
     }
 
     panel.classList.remove('hidden');
-    populateExpansionCropSelector();
+
+    // Preserve the currently selected crop name so option changes don't reset it
     var sel = document.getElementById('expansion_crop_select');
-    var idx = sel ? parseInt(sel.value) || 0 : 0;
+    var savedName = null;
+    if (sel && sel.selectedIndex >= 0 && cropList[sel.selectedIndex]) {
+        savedName = cropList[sel.selectedIndex].name;
+    }
+
+    populateExpansionCropSelector();
+
+    // Restore selection by name (index may have changed due to resorting)
+    var idx = 0;
+    if (savedName && sel) {
+        for (var i = 0; i < cropList.length; i++) {
+            if (cropList[i].name === savedName) { idx = i; break; }
+        }
+        sel.value = idx;
+    }
+
     renderExpansionTable(idx);
 }
 
