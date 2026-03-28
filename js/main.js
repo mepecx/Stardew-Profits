@@ -386,9 +386,14 @@ function canBuySeedsOnDay(crop, absDay) {
     var wednesday = (absDay % 7 === 3);
     // Pierre sells this crop, Pierre is checked, and Pierre is open (closed Wednesdays)
     if (crop.seeds.pierre > 0 && options.seeds.pierre && !wednesday) return true;
-    // Joja sells this crop, Joja is checked, and it's not a festival day (already checked above)
+    // Joja sells this crop, Joja is checked (open every non-festival day)
     if (crop.seeds.joja > 0 && options.seeds.joja) return true;
-    // Special-only seeds (e.g. Egg Festival) are not available for on-demand re-purchase
+    // Special vendor (Oasis, Island Trader, Travelling Cart, etc.) — open every non-festival day.
+    // Exception: festival-exclusive vendors like "Egg Festival" can't be restocked after the event.
+    if (crop.seeds.special > 0 && options.seeds.special) {
+        var loc = crop.seeds.specialLoc || "";
+        if (loc.indexOf("Festival") === -1) return true;
+    }
     return false;
 }
 
