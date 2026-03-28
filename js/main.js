@@ -467,56 +467,116 @@ function calcExpansionCycles(crop) {
     }
 
     if (crop.growth.regrow > 0) {
-        // Regrowing / grow-then-regrow crop: plant once, then all regrow harvests.
-        // Expansion doesn't apply after planting (tiles are committed).
-        var rawPlantDay = 1;
-        var plantRelDay = nextShopOpenDay(rawPlantDay);
-        var plantAbsDay = relToAbsDay(plantRelDay);
-        var closedNote = plantRelDay > rawPlantDay ? "delayed (festival)" : "";
-        if (plantRelDay > totalDays) return cycles;
+        var plantDay1 = nextShopOpenDay(1);
+        if (plantDay1 > totalDays) return cycles;
+        if (plantDay1 + growDays > totalDays) return cycles;
 
-        var firstHarvestRelDay = plantRelDay + growDays;
-        if (firstHarvestRelDay > totalDays) return cycles;
-
-        var n = initialTiles;
-        var cost = n * costPerTile;
-        money -= cost;
-
-        cycles.push({
-            type: 'plant', day: plantRelDay, absDay: plantAbsDay,
-            crops: n, cost: cost, revenue: 0, balance: money,
-            closedNote: closedNote
-        });
+        var n0 = initialTiles;
+        var cost0 = n0 * costPerTile;
+        money -= cost0;
+        isFirstPlanting = false;
 
         if (isTea) {
-            // Tea blooms every day in the last 7 days of each 28-day period
-            for (var d = firstHarvestRelDay; d <= totalDays; d++) {
+            // Tea blooms every day in the last 7 days of each 28-day period — no expansion
+            cycles.push({
+                type: 'plant', day: plantDay1, absDay: relToAbsDay(plantDay1),
+                crops: n0, cost: cost0, revenue: 0, balance: money,
+                closedNote: plantDay1 > 1 ? "delayed (festival)" : ""
+            });
+
+            for (var d = plantDay1 + growDays; d <= totalDays; d++) {
                 var absD = relToAbsDay(d);
                 var dayInSeason = ((absD - 1) % 28) + 1;
                 if (dayInSeason > 21) {
-                    var rev = singleHarvestRevenue(crop, n);
+                    var rev = singleHarvestRevenue(crop, n0);
                     money += rev;
                     cycles.push({
                         type: 'harvest', isRegrow: true, day: d, absDay: absD,
-                        crops: n, cost: 0, revenue: rev, balance: money,
+                        crops: n0, cost: 0, revenue: rev, balance: money,
                         closedNote: ""
                     });
                 }
             }
         } else {
-            var hRelDay = firstHarvestRelDay;
-            var harvestNum = 0;
-            while (hRelDay <= totalDays) {
-                var rev = singleHarvestRevenue(crop, n);
-                money += rev;
-                cycles.push({
-                    type: 'harvest', isRegrow: harvestNum > 0, day: hRelDay, absDay: relToAbsDay(hRelDay),
-                    crops: n, cost: 0, revenue: rev, balance: money,
-                    closedNote: ""
-                });
-                hRelDay += crop.growth.regrow;
-                harvestNum++;
+            // Multi-batch regrowing: after each harvest, try to plant additional tiles
+            var regrowDays = crop.growth.regrow;
+            var allEvents = [];
+            var batches = []; // { tiles, nextHarvestDay, isFirstHarvest }
+
+            allEvents.push({
+                type: 'plant', day: plantDay1, absDay: relToAbsDay(plantDay1),
+                crops: n0, cost: cost0, revenue: 0, balance: money,
+                closedNote: plantDay1 > 1 ? "delayed (festival)" : ""
+            });
+            batches.push({ tiles: n0, nextHarvestDay: plantDay1 + growDays, isFirstHarvest: true });
+
+            while (batches.length > 0) {
+                // Find earliest harvest day across all active batches
+                var minDay = batches.reduce(function(m, b) { return Math.min(m, b.nextHarvestDay); }, Infinity);
+                if (minDay > totalDays) break;
+
+                // Harvest all batches due on minDay
+                var survivingBatches = [];
+                for (var bi = 0; bi < batches.length; bi++) {
+                    var b = batches[bi];
+                    if (b.nextHarvestDay === minDay) {
+                        var rev = singleHarvestRevenue(crop, b.tiles);
+                        money += rev;
+                        allEvents.push({
+                            type: 'harvest', isRegrow: !b.isFirstHarvest,
+                            day: minDay, absDay: relToAbsDay(minDay),
+                            crops: b.tiles, cost: 0, revenue: rev, balance: money,
+                            closedNote: ""
+                        });
+                        var nextHDay = minDay + regrowDays;
+                        if (nextHDay <= totalDays) {
+                            survivingBatches.push({ tiles: b.tiles, nextHarvestDay: nextHDay, isFirstHarvest: false });
+                        }
+                    } else {
+                        survivingBatches.push(b);
+                    }
+                }
+                batches = survivingBatches;
+
+                // After harvesting, try to plant new tiles with accumulated money
+                var totalActiveTiles = batches.reduce(function(s, b) { return s + b.tiles; }, 0);
+                var roomUnderCap = capTiles > 0 ? Math.max(0, capTiles - totalActiveTiles) : Infinity;
+
+                if (roomUnderCap > 0) {
+                    var newPlantDay = nextShopOpenDay(minDay);
+                    if (newPlantDay + growDays <= totalDays) {
+                        var newTiles;
+                        if (costPerTile === 0) {
+                            newTiles = isFinite(roomUnderCap) ? roomUnderCap : 0;
+                        } else {
+                            newTiles = Math.min(
+                                isFinite(roomUnderCap) ? roomUnderCap : Number.MAX_SAFE_INTEGER,
+                                Math.floor(money / costPerTile)
+                            );
+                        }
+                        if (newTiles > 0) {
+                            var newCost = newTiles * costPerTile;
+                            money -= newCost;
+                            allEvents.push({
+                                type: 'plant', day: newPlantDay, absDay: relToAbsDay(newPlantDay),
+                                crops: newTiles, cost: newCost, revenue: 0, balance: money,
+                                closedNote: newPlantDay > minDay ? "delayed (festival)" : ""
+                            });
+                            batches.push({ tiles: newTiles, nextHarvestDay: newPlantDay + growDays, isFirstHarvest: true });
+                        }
+                    }
+                }
             }
+
+            // Sort: ascending day; on same day, harvest before plant (harvest funds the plant)
+            allEvents.sort(function(a, b) {
+                if (a.day !== b.day) return a.day - b.day;
+                if (a.type === 'harvest' && b.type === 'plant') return -1;
+                if (a.type === 'plant' && b.type === 'harvest') return 1;
+                return 0;
+            });
+
+            cycles = allEvents;
         }
     } else {
         // Non-regrowing crop: plant → harvest → reinvest → repeat, expanding tiles each cycle.
